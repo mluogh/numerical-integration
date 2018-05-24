@@ -1,11 +1,21 @@
 import numpy as np
 import math
-import multiprocessing
+from pathos import multiprocessing
+import sys
+import os
 
-def sample_in_process(fn, lows, highs, n):
+def _hypercube_sample(fn, lows, highs, n):
+    ''' Sample uniformly across a hypercube
+
+    Arguments:
+    fn - actual function f: R^n -> R, should take np.array as sole argument
+    intervals - list of tuples representing intervals [a, b] for each dimension
+    n - number of samples to take '''
+
+    if 'UNITTESTING' not in os.environ:
+        np.random.seed()
+        
     CHUNK_SIZE = 1000
-
-    np.random.seed()
 
     count = 0
 
@@ -21,7 +31,7 @@ def sample_in_process(fn, lows, highs, n):
 
     return count
 
-def integrate(fn, intervals, n=1000):
+def integrate_hypercube(fn, intervals, n=1000):
     ''' Integrate a given function in a bounded interval
 
     Arguments:
@@ -52,8 +62,9 @@ def integrate(fn, intervals, n=1000):
 
     p = multiprocessing.Pool(num_cores)
 
-    results = [p.apply_async(sample_in_process, args=(fn, lows, highs, samples_per_core)) for i in range(num_cores)] 
+    results = [p.apply_async(_hypercube_sample, args=(fn, lows, highs, samples_per_core)) for i in range(num_cores)] 
     p.close()
     p.join()
 
     return sum([r.get() for r in results]) * c
+

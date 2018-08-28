@@ -5,8 +5,9 @@ import sys
 import os
 import numbers
 import utils
+import sampling
 
-def _hypercube_sample(fn, lows, highs, n=1000):
+def _hypercube_process_wrapper(fn, lows, highs, n=1000):
     ''' Sample uniformly across a hypercube
 
     Arguments:
@@ -17,24 +18,10 @@ def _hypercube_sample(fn, lows, highs, n=1000):
     # want deterministic seeding for unittesting
     if 'UNITTESTING' not in os.environ:
         np.random.seed()
-        
-    CHUNK_SIZE = 1000
 
-    count = 0
+    return sampling._sample_hypercube(fn, lows, highs, n) 
 
-    # max out the n count so it doesnt allocate a ton of memory and die
-    num_chunks = n // CHUNK_SIZE
-
-    for i in range(num_chunks):
-        points = np.random.uniform(lows, highs, size=(CHUNK_SIZE, len(highs)))
-        count += sum(map(fn, points))
-
-    points = np.random.uniform(lows, highs, size=(n % CHUNK_SIZE, len(highs)))
-    count += sum(map(fn, points))
-
-    return count
-
-def integrate_hypercube(fn, limits, cube=None, n=1000):
+def integrate(fn, limits, cube=None, n=1000):
     ''' Integrate a given function in a bounded interval
 
     Arguments:
@@ -73,42 +60,36 @@ def integrate_hypercube(fn, limits, cube=None, n=1000):
 
     p = multiprocessing.Pool(num_cores)
 
-    results = [p.apply_async(_hypercube_sample, args=(fn, lows, highs, samples_per_core)) for i in range(num_cores)] 
+    results = [p.apply_async(_hypercube_process_wrapper, args=(fn, lows, highs, samples_per_core)) for i in range(num_cores)] 
     p.close()
     p.join()
 
     return sum([r.get() for r in results]) * c
 
-def metropolis_hastings(fn, init_fn, proposal_fn, proposal_density, n, burn_in=1000, skip=1):
+# def metropolis_hastings(fn, init_fn, proposal_fn, proposal_density, n, burn_in=1000, skip=1):
 
-    def acceptance(x, x_p):
-        return min(1, (fn(x_p) / fn(x)) * (proposal_density(x, x_p)/ proposal_density(x_p, x)))
+    # def acceptance(x, x_p):
+        # return min(1, (fn(x_p) / fn(x)) * (proposal_density(x, x_p)/ proposal_density(x_p, x)))
 
-    # pick initial state - user must care to pick prior s.t. always state with non-zero density
-    x = init_fn()
+    # # pick initial state - user must care to pick prior s.t. always state with non-zero density
+    # x = init_fn()
 
-    for i in range(n * skip + burn_in):
-        x_p = proposal_fn(x)
+    # for i in range(n * skip + burn_in):
+        # x_p = proposal_fn(x)
 
-        a = acceptance(x, x_p)
+        # a = acceptance(x, x_p)
 
-        if np.random.rand() < a:
-            x = x_p
+        # if np.random.rand() < a:
+            # x = x_p
 
-        if i >= burn_in and (i - burn_in) % skip == 0:
-            yield x
+        # if i >= burn_in and (i - burn_in) % skip == 0:
+            # yield x
 
-def _mcmc_in_process(integrate_fn, proportional_fn, *args, **kwargs):
-    if 'UNITTESTING' not in os.environ:
-        np.random.seed()
+def _mcmc_process_wrapper(score_fn, *args, **kwargs):
+    s = sampling._metropolis_hastings(*args, **kwargs)
+    return sum(np.apply_along_axis(score_fn, 1, s))
 
-    simulated = metropolis_hastings(proportional_fn, *args, **kwargs)
-
-    samples = (integrate_fn(s)/proportional_fn(s) for s in simulated)
-
-    return sum(samples)
-
-def importance_sample(integrate_fn, proportional_fn, init_fn, limits, n=10000, proposal_fn=None, proposal_density=None, burn_in=1000, skip=1):
+def importance_sample(integrate_fn, dist_fn, init_fn, limits, n=10000, proposal_fn=None, proposal_density=None, burn_in=1000, skip=1):
 
     num_cores = multiprocessing.cpu_count()
     # change n to something that is easily split up by processes
@@ -129,13 +110,22 @@ def importance_sample(integrate_fn, proportional_fn, init_fn, limits, n=10000, p
 
         proposal_density = lambda x, x_p: (1 / math.pow(2 * math.pi, d/2)) * math.exp(-((x_p - x).T @ (x_p - x) / 2))
 
+
     limits = utils.build_limit_fns(limits)
     integrate_fn = utils.fn_limit_wrapper(integrate_fn, limits)
+
+    def acceptance_fn(x, x_p):
+        return min(1, (dist_fn(x_p) / dist_fn(x)) * (proposal_density(x, x_p)/ proposal_density(x_p, x)))
+
+    def score_fn(x):
+        return integrate_fn(x) / dist_fn(x) 
+
+    initial_x = init_fn()
 
     # launch some processes to sample
     p = multiprocessing.Pool(num_cores)
 
-    results = [p.apply_async(_mcmc_in_process, args=(integrate_fn, proportional_fn, init_fn, proposal_fn, proposal_density, samples_per_core), kwds=dict(burn_in=burn_in, skip=skip)) for i in range(num_cores)] 
+    results = [p.apply_async(_mcmc_process_wrapper, args=(score_fn, initial_x, proposal_fn, acceptance_fn, samples_per_core, burn_in, skip)) for i in range(num_cores)] 
     p.close()
     p.join()
 
